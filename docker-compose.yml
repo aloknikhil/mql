@@ -1,42 +1,166 @@
 version: "3"
 services:
   frontend:
-    build:
-      context: ./client
+    x-omnistrate-mode-internal: true
+    x-omnistrate-compute:
+      instanceTypes:
+        - cloudProvider: aws
+          name: t4g.small
+        - cloudProvider: gcp
+          name: e2-small
+    image: omnistrate/mql-client:0.0.2
+    x-omnistrate-capabilities:
+      autoscaling:
+        minReplicas: 1
+        maxReplicas: 5
+      httpReverseProxy:
+        targetPort: 3000
+      enableMultiZone: true
+    environment:
+    - NEXT_PUBLIC_API_URL=https://backend.$(EXTERNAL_DNS_SUFFIX)/api/v1
     ports:
       - "3000:3000"
     networks:
       - mql-net
 
   postgres:
-    build:
-      context: ./storage
+    x-omnistrate-mode-internal: true
+    x-omnistrate-compute:
+      instanceTypes:
+        - cloudProvider: aws
+          name: t4g.small
+        - cloudProvider: gcp
+          name: e2-small
+    x-omnistrate-api-params:
+      - key: password
+        description: Default DB Password
+        name: Password
+        type: String
+        modifiable: false
+        required: true
+        export: false
+      - key: username
+        description: Default DB Username
+        name: Username
+        type: String
+        modifiable: false
+        required: true
+        export: true
+    x-omnistrate-actionhooks:
+      - scope: CLUSTER
+        type: INIT
+        commandTemplate: |
+          #!/bin/bash
+
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres postgres -c "CREATE ROLE shuru WITH superuser"
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres postgres -c "ALTER ROLE shuru WITH LOGIN PASSWORD '{{ $func.sha256($sys.id, $sys.id) }}'"
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres postgres -c "CREATE DATABASE mql WITH OWNER shuru"
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres postgres -c "CREATE DATABASE mql_test WITH OWNER shuru"
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres mql -c "CREATE EXTENSION vector"
+          PGPASSWORD={{ $var.password }} psql -U {{ $var.username }} -h postgres mql_test -c "CREATE EXTENSION vector"
+    image: pgvector/pgvector:0.6.2-pg16
     ports:
       - 5432:5432
     environment:
-      PGUSER: postgres
-      POSTGRES_PASSWORD: password
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready", "-U", "postgres", "-d", "mql"]
-      interval: 10s
-      timeout: 60s
-      retries: 5
-      start_period: 80s
+      - SECURITY_CONTEXT_USER_ID=999
+      - SECURITY_CONTEXT_GROUP_ID=999
+      - POSTGRES_USER=$var.username
+      - POSTGRES_PASSWORD=$var.password
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - mql-net
 
   backend:
-    build:
-      context: ./server
+    x-omnistrate-mode-internal: true
+    image: omnistrate/mql-server:0.0.1
+    x-omnistrate-compute:
+      instanceTypes:
+        - cloudProvider: aws
+          name: t4g.small
+        - cloudProvider: gcp
+          name: e2-small
+    x-omnistrate-capabilities:
+      autoscaling:
+        minReplicas: 1
+        maxReplicas: 5
+      httpReverseProxy:
+        targetPort: 8000
+      enableMultiZone: true
+    x-omnistrate-api-params:
+      - key: openAIAPIKey
+        description: OpenAI API Key
+        name: OpenAI API Key
+        type: String
+        modifiable: true
+        required: true
+        export: false
+      - key: postgresUsername
+        description: Postgres Username
+        name: Postgres Username
+        type: String
+        modifiable: false
+        required: true
+        export: true
+        parameterDependencyMap:
+          postgres: username
+      - key: postgresPassword
+        description: Postgres Password
+        name: Postgres Password
+        type: String
+        modifiable: false
+        required: true
+        export: false
+        parameterDependencyMap:
+          postgres: password
+    depends_on:
+      - postgres
     ports:
       - "8000:8000"
+    environment:
+    - DATABASE_URL=postgresql://shuru:{{ $func.sha256($sys.id, $sys.id) }}@postgres:5432/mql
+    - TEST_DATABASE_URL=postgresql://shuru:{{ $func.sha256($sys.id, $sys.id) }}@localhost:5432/mql_test
+    - SECRET_KEY={{ $func.sha256($sys.id, backend_secret) }}
+    - ALGORITHM=HS256
+    - ACCESS_TOKEN_EXPIRE_MINUTES=60
+    - OPENAI_API_KEY={{ $var.openAIAPIKey }}
     networks:
       - mql-net
+
+  cluster:
+    x-omnistrate-mode-internal: false
+    image: omnistrate/noop
     depends_on:
-        postgres:
-          condition: service_healthy
+      - frontend
+      - backend
+    x-omnistrate-api-params:
+      - key: postgresUsername
+        description: Postgres Username
+        name: Postgres Username
+        type: String
+        modifiable: false
+        required: true
+        export: true
+        parameterDependencyMap:
+          backend: username
+      - key: postgresPassword
+        description: Postgres Password
+        name: Postgres Password
+        type: String
+        modifiable: false
+        required: true
+        export: false
+        parameterDependencyMap:
+          backend: password
+      - key: openAIAPIKey
+        description: OpenAI API Key
+        name: OpenAI API Key
+        type: String
+        modifiable: true
+        required: true
+        export: false
+        parameterDependencyMap:
+          backend: openAIAPIKey
 
 networks:
   mql-net:

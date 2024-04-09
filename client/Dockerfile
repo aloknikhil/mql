@@ -10,4 +10,6 @@ COPY . .
 
 RUN npm run build
 
+ENTRYPOINT ["/analytics-web/entrypoint.sh"]
+
 CMD ["npm", "run", "start"]
